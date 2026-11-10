@@ -53,15 +53,15 @@ In addition to focusing exclusively on media playback, this mod introduces its o
 The goal is to provide a more focused and customizable Dynamic Island experience for users who primarily want media playback integration, rather than a multi-module desktop overlay.
 
 ## Key Features
--Context Menu Priority: The right-click context menu acts as the primary configuration source. Settings changed here persistently override default Windhawk configurations.
+- **Context Menu Priority:** The right-click context menu acts as the primary configuration source. Settings changed here persistently override default Windhawk configurations.
 
--Smart Media Tracking: Real-time track metadata, album art, app badges, and progress scrubbing via Windows System Media Transport.
+- **Smart Media Tracking:** Real-time track metadata, album art, app badges, and progress scrubbing via Windows System Media Transport.
 
--Optimized Rendering: Hybrid event-driven architecture with intelligent sleep throttling designed to minimize CPU/GPU consumption.
+- **Optimized Rendering:** Throttled media-session polling and intelligent render pacing designed to minimize CPU/GPU consumption.
 
--Per-App Dynamic Screen Positioning: Supports saving unique screen positions on a per-application basis.
+- **Per-App Dynamic Screen Positioning:** Supports saving unique screen positions on a per-application basis.
 
--Trilingual Localized UI (UA / RU / EN): Full native support for Ukrainian, Russian, and English.
+- **Trilingual Localized UI (UA / RU / EN): Full native support for Ukrainian, Russian, and English.
 
 ## Credits & Acknowledgements
 - **Himanshu (devcode90)** - For the original Dynamic Island for Windows framework, rendering physics, and core UI design.
@@ -243,6 +243,7 @@ constexpr wchar_t kWindowClass[] = L"Windhawk.DynamicIslandMediaPlayer";
 constexpr UINT WM_APP_NEW_EVENT = WM_APP + 0x443;
 constexpr UINT WM_APP_WAKE = WM_APP + 0x446;
 constexpr UINT WM_APP_APPLY_HOTKEY = WM_APP + 0x447;
+constexpr UINT WM_APP_PERSIST_HOTKEY = WM_APP + 0x448;
 
 enum HotkeyId : int {
     kHotkeyHideShow = 1,
@@ -366,6 +367,7 @@ struct Settings {
     int offsetY = 0;
     float sizeScale = 1.0f;
     float baseSizeScale = 1.0f;
+    bool autoDpiScale = true;
     std::wstring fontFamily;
     AccentMode accentMode = AccentMode::Auto;
     bool smoothAccent = true;
@@ -406,7 +408,6 @@ struct MediaSnapshot {
     std::wstring sourceBadge;
     std::wstring trackId; 
     
-    winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSession activeSession{nullptr};
 
     std::shared_ptr<const BitmapPixels> art;
     std::shared_ptr<const BitmapPixels> sourceIcon;
@@ -460,8 +461,17 @@ Settings GetSettingsCopy() {
 }
 
 std::mutex g_stateMutex;
+// Keep the WinRT object out of g_state: it must be released on the media
+// thread while that thread's WinRT apartment is still initialized.
+[[clang::no_destroy]] winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSession
+    g_activeSession{nullptr};  // guarded by g_stateMutex
 SharedState g_state;
+std::atomic<HMONITOR> g_targetMonitor{nullptr};
 std::atomic<uint64_t> g_artGenerationCounter{0};
+std::atomic<ULONGLONG> g_lastPlaybackCommandTicks{0};
+std::atomic<bool> g_mediaSourceFilterEnabled{false};
+std::mutex g_mediaFilterMutex;
+std::wstring g_allowedMediaSource;
 
 std::atomic<HWND> g_hwnd{nullptr};
 HANDLE g_stopEvent = nullptr;
@@ -941,6 +951,18 @@ void LoadSettings() {
 
     const std::wstring mon = GetStringSettingCopy(L"Appearance.TargetMonitor");
     next.targetMonitor = EqualsNoCase(mon, L"primary") ? 0 : _wtoi(mon.c_str());
+    next.autoDpiScale = Wh_GetIntSetting(L"Appearance.AutoDpiScale") != 0;
+    g_mediaSourceFilterEnabled = Wh_GetIntValue(L"MediaSourceFilterEnabled", 0) != 0;
+    {
+        wchar_t allowedSource[1024] = {};
+        std::wstring value;
+        if (Wh_GetStringValue(L"AllowedMediaSource", allowedSource, ARRAYSIZE(allowedSource))) {
+            value = allowedSource;
+        }
+        std::lock_guard lock(g_mediaFilterMutex);
+        g_allowedMediaSource = std::move(value);
+    }
+    g_targetMonitor.store(ResolveTargetMonitor(next.targetMonitor));
 
     if (Wh_GetIntValue(L"CustomPosSet", 0) != 0) {
         g_customCenterX = Wh_GetIntValue(L"CustomPosX", 0);
@@ -1096,7 +1118,8 @@ void LoadSettings() {
 }
 
 RECT GetAnchorWorkRect(const Settings& s) {
-    HMONITOR selected = ResolveTargetMonitor(s.targetMonitor);
+    HMONITOR selected = g_targetMonitor.load();
+    if (!selected) selected = ResolveTargetMonitor(s.targetMonitor);
     MONITORINFO mi = {sizeof(mi)};
     GetMonitorInfoW(selected, &mi);
     return mi.rcWork;
@@ -1454,6 +1477,7 @@ DWORD WINAPI MediaThreadProc(void*) {
 
     using Manager = winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
     using PlaybackStatus = winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus;
+    using Session = winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSession;
 
     Manager manager{nullptr};
     
@@ -1470,7 +1494,19 @@ DWORD WINAPI MediaThreadProc(void*) {
             prev = g_state.media;
         }
         MediaSnapshot next;
+        Session selectedSession{nullptr};
         const double now = NowSeconds();
+        bool sourceFilterEnabled = g_mediaSourceFilterEnabled.load();
+        std::wstring allowedSource;
+        {
+            std::lock_guard lock(g_mediaFilterMutex);
+            allowedSource = g_allowedMediaSource;
+        }
+        auto sourceAllowed = [&](const Session& candidate) {
+            if (!sourceFilterEnabled || allowedSource.empty()) return true;
+            try { return EqualsNoCase(candidate.SourceAppUserModelId().c_str(), allowedSource); }
+            catch (...) { return false; }
+        };
 
         try {
             if (!manager) manager = Manager::RequestAsync().get();
@@ -1481,7 +1517,7 @@ DWORD WINAPI MediaThreadProc(void*) {
                 for (auto const& candidate : manager.GetSessions()) {
                     if (candidate) {
                         try {
-                            if (candidate.GetPlaybackInfo().PlaybackStatus() == PlaybackStatus::Playing) {
+                            if (sourceAllowed(candidate) && candidate.GetPlaybackInfo().PlaybackStatus() == PlaybackStatus::Playing) {
                                 session = candidate;
                                 foundPlaying = true;
                                 break;
@@ -1495,12 +1531,13 @@ DWORD WINAPI MediaThreadProc(void*) {
                     s_lastPlayingTime = now;
                 } else {
                     auto currentSystemSession = manager.GetCurrentSession();
+                    if (currentSystemSession && !sourceAllowed(currentSystemSession)) currentSystemSession = nullptr;
                     std::wstring currentSystemAumid;
                     if (currentSystemSession) currentSystemAumid = currentSystemSession.SourceAppUserModelId().c_str();
 
                     if (!s_preferredAumid.empty() && currentSystemAumid != s_preferredAumid && (now - s_lastPlayingTime < 10.0)) {
                         for (auto const& candidate : manager.GetSessions()) {
-                            if (candidate.SourceAppUserModelId().c_str() == s_preferredAumid) {
+                            if (sourceAllowed(candidate) && candidate.SourceAppUserModelId().c_str() == s_preferredAumid) {
                                 session = candidate;
                                 break;
                             }
@@ -1513,17 +1550,29 @@ DWORD WINAPI MediaThreadProc(void*) {
                 }
             }
 
+            if (session && !sourceAllowed(session)) session = nullptr;
+            selectedSession = session;
             if (session) {
-                next.activeSession = session; 
                 auto properties = session.TryGetMediaPropertiesAsync().get();
                 auto playback = session.GetPlaybackInfo();
                 auto timeline = session.GetTimelineProperties();
 
                 next.available = true;
                 next.playing = playback.PlaybackStatus() == PlaybackStatus::Playing;
+                const ULONGLONG commandTick = g_lastPlaybackCommandTicks.load();
+                const ULONGLONG currentTick = GetTickCount64();
+                if (commandTick && currentTick >= commandTick && currentTick - commandTick < 1400) {
+                    // The session can report its pre-command state for a few polls.
+                    // Keep the one optimistic state until the command has settled.
+                    {
+                        std::lock_guard lock(g_stateMutex);
+                        next.playing = g_state.media.playing;
+                    }
+                }
                 next.title = properties.Title().c_str();
                 next.artist = properties.Artist().c_str();
                 next.albumTitle = properties.AlbumTitle().c_str();
+                next.sourceAppUserModelId = session.SourceAppUserModelId().c_str();
 
                 if (!next.playing) {
                     next.pausedAt = prev.playing ? now : (prev.pausedAt > 0.0 ? prev.pausedAt : now);
@@ -1534,7 +1583,14 @@ DWORD WINAPI MediaThreadProc(void*) {
                 if (timeline) {
                     const int64_t np = timeline.Position().count();
                     const int64_t ne = timeline.EndTime().count();
-                    if (np != prev.positionTicks || ne != prev.endTicks || next.playing != prev.playing) {
+                    const bool sameTrack = next.sourceAppUserModelId == prev.sourceAppUserModelId &&
+                        next.title == prev.title && next.artist == prev.artist;
+                    if (!next.playing && !prev.playing && sameTrack) {
+                        // Paused/stopped sessions sometimes publish jittering timeline snapshots.
+                        next.positionTicks = prev.positionTicks;
+                        next.endTicks = ne > 0 ? ne : prev.endTicks;
+                        next.lastUpdatedTicks = prev.lastUpdatedTicks;
+                    } else if (np != prev.positionTicks || ne != prev.endTicks || next.playing != prev.playing) {
                         next.positionTicks = np;
                         next.endTicks = ne;
                         next.lastUpdatedTicks = GetTickCount64();
@@ -1614,6 +1670,7 @@ DWORD WINAPI MediaThreadProc(void*) {
                 }
             }
         } catch (...) {
+            selectedSession = nullptr;
             manager = nullptr;
         }
 
@@ -1632,6 +1689,7 @@ DWORD WINAPI MediaThreadProc(void*) {
                 next.art = prev.art;
             }
             
+            g_activeSession = selectedSession;
             g_state.media = std::move(next);
         }
 
@@ -1647,9 +1705,13 @@ DWORD WINAPI MediaThreadProc(void*) {
             }
         }
 
-        WaitForSingleObject(g_stopEvent, 100);
+        WaitForSingleObject(g_stopEvent, 200);
     }
 
+    {
+        std::lock_guard lock(g_stateMutex);
+        g_activeSession = nullptr;
+    }
     manager = nullptr;
     winrt::uninit_apartment();
     return 0;
@@ -1662,7 +1724,7 @@ void SeekMediaToTicks(int64_t targetTicks) {
             winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSession session = nullptr;
             {
                 std::lock_guard lock(g_stateMutex);
-                session = g_state.media.activeSession;
+                session = g_activeSession;
             }
             if (session) {
                 session.TryChangePlaybackPositionAsync(targetTicks).get();
@@ -1676,9 +1738,23 @@ void SendMediaTransportCommand(int cmd) {
     {
         std::lock_guard lock(g_stateMutex);
         if (cmd == 1) {
+            const ULONGLONG commandNow = GetTickCount64();
+            // When pausing, freeze the interpolated position at the exact command
+            // time. The next GSMTC timeline snapshot may still contain an older
+            // position (the polling interval can be several hundred milliseconds).
+            if (g_state.media.playing && g_state.media.lastUpdatedTicks > 0 &&
+                commandNow >= g_state.media.lastUpdatedTicks) {
+                int64_t positionAtPause = g_state.media.positionTicks +
+                    static_cast<int64_t>(commandNow - g_state.media.lastUpdatedTicks) * 10000LL;
+                if (g_state.media.endTicks > 0) {
+                    positionAtPause = std::min(positionAtPause, g_state.media.endTicks);
+                }
+                g_state.media.positionTicks = std::max<int64_t>(0, positionAtPause);
+            }
             g_state.media.playing = !g_state.media.playing;
             g_state.media.pausedAt = g_state.media.playing ? 0.0 : NowSeconds();
-            g_state.media.lastUpdatedTicks = GetTickCount64();
+            g_state.media.lastUpdatedTicks = commandNow;
+            g_lastPlaybackCommandTicks = commandNow;
         } else if (cmd == 0 || cmd == 2) {
             g_state.media.positionTicks = 0;
             g_state.media.lastUpdatedTicks = GetTickCount64();
@@ -1696,7 +1772,7 @@ void SendMediaTransportCommand(int cmd) {
             winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSession session = nullptr;
             {
                 std::lock_guard lock(g_stateMutex);
-                session = g_state.media.activeSession;
+                session = g_activeSession;
             }
             if (session) {
                 sessionAttempted = true;
@@ -2903,10 +2979,12 @@ LRESULT CALLBACK CaptureKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                     else if (target == 4) { g_hkPlayPauseMods = mods; g_hkPlayPauseVk = vk; }
                     
                     g_hotkeyEnabled = true;
-                    PersistHotkeys();
                     g_captureHotkey = false;
                     HWND hSelf = g_hwnd.load();
-                    if (hSelf) PostMessageW(hSelf, WM_APP_APPLY_HOTKEY, 0, 0);
+                    if (hSelf) {
+                        PostMessageW(hSelf, WM_APP_PERSIST_HOTKEY, 0, 0);
+                        PostMessageW(hSelf, WM_APP_APPLY_HOTKEY, 0, 0);
+                    }
                 }
             }
         }
@@ -2967,6 +3045,8 @@ enum MenuId : UINT {
     ID_HOTKEY_NEXT_SET,
     ID_HOTKEY_PREV_SET,
     ID_HOTKEY_PLAYPAUSE_SET,
+    ID_MEDIA_SOURCE_FILTER_TOGGLE,
+    ID_MEDIA_SOURCE_FILTER_SET_CURRENT,
     ID_IDLE_NEVER,
     ID_IDLE_30S,
     ID_IDLE_1M,
@@ -3121,6 +3201,16 @@ void ShowSettingsMenu(HWND hwnd, POINT screenPoint) {
 
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(hotkeyMenu), Tr(L"Гарячі клавіші", L"Бинды", L"Hotkeys"));
 
+    HMENU mediaSourceFilterMenu = CreatePopupMenu();
+    AppendMenuW(mediaSourceFilterMenu,
+                MF_STRING | (g_mediaSourceFilterEnabled.load() ? MF_CHECKED : 0),
+                ID_MEDIA_SOURCE_FILTER_TOGGLE,
+                Tr(L"Увімкнути фільтрацію", L"Включить фильтрацию", L"Enable filtering"));
+    AppendMenuW(mediaSourceFilterMenu, MF_STRING, ID_MEDIA_SOURCE_FILTER_SET_CURRENT,
+                Tr(L"Дозволити лише поточне джерело", L"Разрешить только текущий источник", L"Allow current source only"));
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(mediaSourceFilterMenu),
+                Tr(L"Фільтрація джерел", L"Фильтрация источников", L"Source filtering"));
+
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (g_moveMode.load() ? MF_CHECKED : 0), ID_MOVE,
                 g_moveMode.load() ? Tr(L"Готово (завершити переміщення)", L"Готово (закончить перемещение)", L"Done moving")
@@ -3199,6 +3289,29 @@ void ShowSettingsMenu(HWND hwnd, POINT screenPoint) {
             g_confirmTrackChange = !g_confirmTrackChange.load();
             Wh_SetIntValue(L"ConfirmTrackChange", g_confirmTrackChange.load() ? 1 : 0);
             break;
+        case ID_MEDIA_SOURCE_FILTER_TOGGLE:
+            g_mediaSourceFilterEnabled = !g_mediaSourceFilterEnabled.load();
+            Wh_SetIntValue(L"MediaSourceFilterEnabled", g_mediaSourceFilterEnabled.load() ? 1 : 0);
+            g_layoutDirty = true;
+            break;
+        case ID_MEDIA_SOURCE_FILTER_SET_CURRENT: {
+            std::wstring currentSource;
+            {
+                std::lock_guard lock(g_stateMutex);
+                currentSource = g_state.media.sourceAppUserModelId;
+            }
+            if (!currentSource.empty()) {
+                {
+                    std::lock_guard lock(g_mediaFilterMutex);
+                    g_allowedMediaSource = currentSource;
+                }
+                Wh_SetStringValue(L"AllowedMediaSource", currentSource.c_str());
+                g_mediaSourceFilterEnabled = true;
+                Wh_SetIntValue(L"MediaSourceFilterEnabled", 1);
+            }
+            g_layoutDirty = true;
+            break;
+        }
         case ID_IDLE_NEVER: setIdleVal(0); break;
         case ID_IDLE_30S:   setIdleVal(30); break;
         case ID_IDLE_1M:    setIdleVal(60); break;
@@ -3429,6 +3542,8 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         
         case WM_DISPLAYCHANGE: {
+            const Settings cfg = GetSettingsCopy();
+            g_targetMonitor.store(ResolveTargetMonitor(cfg.targetMonitor));
             g_layoutDirty = true;
             return 0;
         }
@@ -3670,6 +3785,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
+        case WM_APP_PERSIST_HOTKEY:
+            PersistHotkeys();
+            return 0;
+
         case WM_APP_APPLY_HOTKEY:
             ApplyHideShowHotkey(hwnd);
             return 0;
@@ -3789,7 +3908,7 @@ DWORD WINAPI RenderThreadProc(void*) {
             }
         }
 
-        if (Wh_GetIntSetting(L"Appearance.AutoDpiScale") != 0) {
+        if (cfg.autoDpiScale) {
             HMONITOR targetMon = nullptr;
             if (hasAppPos) {
                 POINT pt = {appX, appY};
@@ -3798,7 +3917,8 @@ DWORD WINAPI RenderThreadProc(void*) {
                 POINT pt = {g_customCenterX.load(), g_customTop.load()};
                 targetMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
             } else {
-                targetMon = ResolveTargetMonitor(cfg.targetMonitor);
+                targetMon = g_targetMonitor.load();
+                if (!targetMon) targetMon = ResolveTargetMonitor(cfg.targetMonitor);
             }
             cfg.sizeScale = cfg.baseSizeScale * GetMonitorDpiScale(targetMon);
         } else {
@@ -4009,19 +4129,21 @@ DWORD WINAPI RenderThreadProc(void*) {
             targetFps = ClampInt(targetFps, 30, 1000);
             double targetFrameMs = 1000.0 / targetFps;
             
-            nextFrameTarget += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            const auto framePeriod = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                 std::chrono::duration<double, std::milli>(targetFrameMs));
-            
-            while (true) {
-                const auto nowTime = std::chrono::steady_clock::now();
-                if (nowTime >= nextFrameTarget) break;
-                if (WaitForSingleObject(g_stopEvent, 0) != WAIT_TIMEOUT) break;
-                const double remainingMs = std::chrono::duration<double, std::milli>(nextFrameTarget - nowTime).count();
-                if (remainingMs > 1.0) {
-                    Sleep(1);
-                } else {
-                    Sleep(0);
-                }
+            nextFrameTarget += framePeriod;
+            const auto frameNow = std::chrono::steady_clock::now();
+            if (frameNow >= nextFrameTarget) {
+                // Do not render catch-up frames after a modal dialog or a stall.
+                nextFrameTarget = frameNow;
+            }
+
+            const auto waitNow = std::chrono::steady_clock::now();
+            if (waitNow < nextFrameTarget) {
+                const auto remaining = nextFrameTarget - waitNow;
+                const auto remainingMs = std::chrono::duration<double, std::milli>(remaining).count();
+                const DWORD timeout = static_cast<DWORD>(std::max(0.0, std::ceil(remainingMs)));
+                MsgWaitForMultipleObjects(1, &g_stopEvent, FALSE, timeout, QS_ALLINPUT);
             }
         }
     }
