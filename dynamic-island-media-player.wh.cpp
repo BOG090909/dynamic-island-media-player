@@ -219,6 +219,7 @@ This mod is a specialized, lightweight adaptation of the incredible **[Dynamic I
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <list>
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -394,6 +395,7 @@ struct MediaSnapshot {
     std::wstring sourceAppUserModelId;
     std::wstring sourceName;
     std::wstring sourceBadge;
+    std::wstring trackId; // НОВОЕ: Уникальный ID для кэша и защиты сессии
     std::shared_ptr<const BitmapPixels> art;
     std::shared_ptr<const BitmapPixels> sourceIcon;
     double titleChangedAt = 0.0;
@@ -403,6 +405,11 @@ struct MediaSnapshot {
     int64_t endTicks = 0;
     ULONGLONG lastUpdatedTicks = 0;
 };
+
+// НОВОЕ: Система кэширования и защиты фоновых потоков
+std::unordered_map<std::wstring, std::shared_ptr<const BitmapPixels>> g_artCache;
+std::list<std::wstring> g_artCacheOrder;
+std::atomic<bool> g_artFetchInProgress{false};
 
 struct SharedState {
     MediaSnapshot media;
@@ -672,17 +679,6 @@ void SaveAppPositionsToRegistry() {
         serialized += exe + L"=" + std::to_wstring(pos.centerX) + L"," + std::to_wstring(pos.top) + L";";
     }
     Wh_SetStringValue(L"AppPositionsData", serialized.c_str());
-}
-
-void SaveRainbowPalette() {
-    std::lock_guard lock(g_rainbowMutex);
-    std::wstring s;
-    for (const auto& c : g_rainbowPalette) {
-        wchar_t hex[32];
-        swprintf_s(hex, L"#%02X%02X%02X,", static_cast<int>(c.r * 255), static_cast<int>(c.g * 255), static_cast<int>(c.b * 255));
-        s += hex;
-    }
-    Wh_SetStringValue(L"RainbowPalette", s.c_str());
 }
 
 D2D1_COLOR_F ColorFromHex(std::wstring text, D2D1_COLOR_F fallback) {
@@ -1032,29 +1028,6 @@ void LoadSettings() {
         g_idleTimeoutSec = idleStr.empty() ? 0 : _wtoi(idleStr.c_str());
     }
     next.idleTimeoutSec = g_idleTimeoutSec.load();
-
-    // Загрузка палитры Rainbow
-    wchar_t palBuf[1024];
-    if (Wh_GetStringValue(L"RainbowPalette", palBuf, ARRAYSIZE(palBuf))) {
-        std::wstring s(palBuf);
-        std::vector<D2D1_COLOR_F> loaded;
-        size_t pos = 0;
-        while (pos < s.size()) {
-            size_t comma = s.find(L',', pos);
-            if (comma == std::wstring::npos) comma = s.size();
-            std::wstring hex = s.substr(pos, comma - pos);
-            if (!hex.empty()) {
-                loaded.push_back(ColorFromHex(hex, D2D1::ColorF(0)));
-            }
-            pos = comma + 1;
-        }
-        if (!loaded.empty()) {
-            std::lock_guard lock(g_rainbowMutex);
-            g_rainbowPalette = std::move(loaded);
-        }
-    }
-    int rSpeed = Wh_GetIntValue(L"RainbowSpeed", -1);
-    if (rSpeed != -1) g_colorRainbowSpeed = rSpeed / 10.0f;
 
     g_clickThrough = Wh_GetIntValue(L"ClickThrough", 0) != 0;
     g_disableAnimations = Wh_GetIntValue(L"DisableAnimations", 0) != 0;
@@ -1474,10 +1447,14 @@ DWORD WINAPI MediaThreadProc(void*) {
     static std::wstring s_cachedVlcTitle;
     static double s_lastVlcScan = 0.0;
     static double s_lastIconSearch = 0.0;
-    static double s_lastArtRequest = 0.0;
 
-    static std::wstring s_lastArtTitle;
-    static bool s_artFailed = false;
+    // Состояния повторных попыток
+    static int s_artRetryCount = 0;
+    static double s_nextArtRetryTime = 0.0;
+
+    // Защита от перехвата медиасессии
+    static std::wstring s_preferredAumid;
+    static double s_lastPlayingTime = 0.0;
 
     while (WaitForSingleObject(g_stopEvent, 0) == WAIT_TIMEOUT) {
         MediaSnapshot prev;
@@ -1490,8 +1467,53 @@ DWORD WINAPI MediaThreadProc(void*) {
 
         try {
             if (!manager) manager = Manager::RequestAsync().get();
-            auto session = manager ? SelectActiveMediaSession(manager)
-                                   : winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSession{nullptr};
+
+            winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSession session = nullptr;
+            if (manager) {
+                bool foundPlaying = false;
+                for (auto const& candidate : manager.GetSessions()) {
+                    if (candidate) {
+                        try {
+                            if (candidate.GetPlaybackInfo().PlaybackStatus() == PlaybackStatus::Playing) {
+                                session = candidate;
+                                foundPlaying = true;
+                                break;
+                            }
+                        } catch (...) {}
+                    }
+                }
+
+                if (foundPlaying) {
+                    // Запоминаем приоритетное приложение, которое реально играет музыку
+                    s_preferredAumid = session.SourceAppUserModelId().c_str();
+                    s_lastPlayingTime = now;
+                } else {
+                    auto currentSystemSession = manager.GetCurrentSession();
+                    std::wstring currentSystemAumid;
+                    if (currentSystemSession) {
+                        currentSystemAumid = currentSystemSession.SourceAppUserModelId().c_str();
+                    }
+
+                    // ЗАЩИТА: Удерживаем приоритетное приложение 10 секунд после паузы
+                    if (!s_preferredAumid.empty() && currentSystemAumid != s_preferredAumid && (now - s_lastPlayingTime < 10.0)) {
+                        for (auto const& candidate : manager.GetSessions()) {
+                            if (candidate.SourceAppUserModelId().c_str() == s_preferredAumid) {
+                                session = candidate;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Если защиты нет или приложение исчезло, берем то, что дает Windows
+                    if (!session) {
+                        session = currentSystemSession;
+                        if (session) {
+                            s_preferredAumid = session.SourceAppUserModelId().c_str();
+                        }
+                    }
+                }
+            }
+
             if (session) {
                 auto properties = session.TryGetMediaPropertiesAsync().get();
                 auto playback = session.GetPlaybackInfo();
@@ -1525,8 +1547,11 @@ DWORD WINAPI MediaThreadProc(void*) {
 
                 next.sourceAppUserModelId = session.SourceAppUserModelId().c_str();
                 next.sourceName = FriendlyMediaSourceName(next.sourceAppUserModelId);
+                
+                // Комплексный ID для идеального кэширования и детекции
+                next.trackId = next.sourceAppUserModelId + L"|" + next.title + L"|" + next.artist + L"|" + next.albumTitle;
 
-                // VLC Hack throttled to 1Hz to reduce CPU usage
+                // --- Хак для VLC (без изменений) ---
                 if (next.title.empty() && next.sourceName == L"VLC") {
                     if (now - s_lastVlcScan > 1.0) {
                         s_lastVlcScan = now;
@@ -1556,9 +1581,10 @@ DWORD WINAPI MediaThreadProc(void*) {
                         }
                     }
                     next.title = s_cachedVlcTitle;
+                    next.trackId = next.sourceAppUserModelId + L"|VLC_HACK|" + next.title;
                 }
 
-                // App Icon Search throttled to 5 seconds if failed
+                // --- Поиск иконки (без изменений) ---
                 if (next.sourceAppUserModelId == prev.sourceAppUserModelId) {
                     next.sourceBadge = prev.sourceBadge;
                     next.sourceIcon = prev.sourceIcon;
@@ -1572,29 +1598,96 @@ DWORD WINAPI MediaThreadProc(void*) {
                     next.sourceIcon = FindMediaSourceIcon(next.sourceAppUserModelId);
                 }
 
-                const bool metadataChanged = (next.title != prev.title || next.artist != prev.artist);
+                // --- ЛОГИКА ALBUM ART (Асинхронно + Кэш + Умные ретраи) ---
+                bool metadataChanged = (next.trackId != prev.trackId);
                 next.metaChangedAt = metadataChanged ? now : prev.metaChangedAt;
                 
                 if (metadataChanged) {
-                    s_lastArtTitle = next.title;
-                    s_artFailed = false;
+                    s_artRetryCount = 0;
+                    s_nextArtRetryTime = 0.0; // Сбрасываем таймер для немедленного запроса!
                 }
 
-                // Album Art Deco with caching state to avoid spamming WIC on missing art
-                if (!metadataChanged && prev.art) {
-                    next.art = prev.art;
-                } else if (!s_artFailed && now - s_lastArtRequest > 1.5) {
-                    if (auto thumbnail = properties.Thumbnail()) {
-                        s_lastArtRequest = now;
-                        std::vector<uint8_t> bytes = ReadWinRtStreamBytes(thumbnail);
-                        BitmapPixels decoded;
-                        if (!bytes.empty() && DecodeImageBytesToPixels(bytes, &decoded)) {
-                            next.art = std::make_shared<const BitmapPixels>(std::move(decoded));
-                        } else {
-                            s_artFailed = true; // Stop trying for this track
+                std::shared_ptr<const BitmapPixels> cachedArt;
+                bool foundInCache = false;
+                
+                // 1. Ищем в кэше
+                {
+                    std::lock_guard lock(g_stateMutex);
+                    auto it = g_artCache.find(next.trackId);
+                    if (it != g_artCache.end()) {
+                        cachedArt = it->second;
+                        foundInCache = true;
+                    }
+                }
+
+                if (foundInCache) {
+                    next.art = cachedArt; // Может быть nullptr (негативный кэш), и это правильно
+                } else if (!g_artFetchInProgress.load() && now >= s_nextArtRetryTime) {
+                    
+                    auto thumbnailRef = properties.Thumbnail();
+                    if (!thumbnailRef) {
+                        // Обложки у трека физически нет. Пишем в негативный кэш.
+                        std::lock_guard lock(g_stateMutex);
+                        g_artCache[next.trackId] = nullptr;
+                        g_artCacheOrder.push_back(next.trackId);
+                        if (g_artCache.size() > 20) {
+                            g_artCache.erase(g_artCacheOrder.front());
+                            g_artCacheOrder.pop_front();
                         }
                     } else {
-                        s_artFailed = true;
+                        // Обложка есть, запускаем асинхронный воркер
+                        g_artFetchInProgress.store(true);
+                        
+                        std::thread([thumbnailRef, trackId = next.trackId]() {
+                            winrt::init_apartment(winrt::apartment_type::multi_threaded);
+                            std::shared_ptr<const BitmapPixels> decodedArt = nullptr;
+                            bool success = false;
+                            
+                            try {
+                                std::vector<uint8_t> bytes = ReadWinRtStreamBytes(thumbnailRef);
+                                BitmapPixels pixels;
+                                if (!bytes.empty() && DecodeImageBytesToPixels(bytes, &pixels)) {
+                                    decodedArt = std::make_shared<const BitmapPixels>(std::move(pixels));
+                                    success = true;
+                                }
+                            } catch (...) {}
+                            winrt::uninit_apartment();
+
+                            {
+                                std::lock_guard lock(g_stateMutex);
+                                if (success) {
+                                    // Сохраняем в LRU-кэш
+                                    g_artCache[trackId] = decodedArt;
+                                    g_artCacheOrder.push_back(trackId);
+                                    if (g_artCache.size() > 20) {
+                                        g_artCache.erase(g_artCacheOrder.front());
+                                        g_artCacheOrder.pop_front();
+                                    }
+                                    
+                                    // Если юзер не успел переключить трек, пока мы декодировали:
+                                    if (g_state.media.trackId == trackId) {
+                                        g_state.media.art = decodedArt;
+                                    }
+                                }
+                            }
+                            
+                            g_artFetchInProgress.store(false);
+                            
+                            // Пробуждаем UI поток, чтобы он перерисовал обложку
+                            if (HWND h = g_hwnd.load()) {
+                                PostMessageW(h, WM_APP_WAKE, 0, 0);
+                            }
+                        }).detach();
+
+                        // Устанавливаем интервал повторной попытки (на случай, если поток упал в catch)
+                        double delay = 0.25;
+                        if (s_artRetryCount == 1) delay = 0.5;
+                        else if (s_artRetryCount == 2) delay = 1.0;
+                        else if (s_artRetryCount >= 3) delay = 5.0;
+                        if (s_artRetryCount > 5) delay = 10.0; // Ограничиваем спам, если API сошло с ума
+
+                        s_nextArtRetryTime = now + delay;
+                        s_artRetryCount++;
                     }
                 }
             }
@@ -1607,11 +1700,18 @@ DWORD WINAPI MediaThreadProc(void*) {
         {
             std::lock_guard lock(g_stateMutex);
             const MediaSnapshot& cur = g_state.media;
+            // Учитываем trackId вместо простых title/artist
             trackChanged = next.available && !next.title.empty() && next.playing &&
-                           (next.title != cur.title || next.artist != cur.artist || !cur.playing);
+                           (next.trackId != cur.trackId || !cur.playing);
             next.titleChangedAt = trackChanged ? now : cur.titleChangedAt;
             anyChange = next.available != cur.available || next.playing != cur.playing ||
-                        next.title != cur.title;
+                        next.trackId != cur.trackId;
+            
+            // Если арт не был найден в кэше, оставляем старый до загрузки нового, чтобы не было черного квадрата
+            if (!next.art && prev.art && next.trackId == prev.trackId) {
+                next.art = prev.art;
+            }
+            
             g_state.media = std::move(next);
         }
 
@@ -3269,27 +3369,21 @@ void ShowSettingsMenu(HWND hwnd, POINT screenPoint) {
         case ID_ADD_RAINBOW_COLOR: {
             D2D1_COLOR_F newCol = D2D1::ColorF(0xff0000);
             if (PickColorWithDialog(hwnd, newCol)) {
-                {
-                    std::lock_guard lock(g_rainbowMutex);
-                    g_rainbowPalette.push_back(newCol);
-                }
-                SaveRainbowPalette();
+                std::lock_guard lock(g_rainbowMutex);
+                g_rainbowPalette.push_back(newCol);
                 g_layoutDirty = true;
             }
             break;
         }
         case ID_RESET_RAINBOW_COLORS: {
-            {
-                std::lock_guard lock(g_rainbowMutex);
-                g_rainbowPalette = { D2D1::ColorF(0x4cc9f0), D2D1::ColorF(0x7209b7), D2D1::ColorF(0xf72585) };
-            }
-            SaveRainbowPalette();
+            std::lock_guard lock(g_rainbowMutex);
+            g_rainbowPalette = { D2D1::ColorF(0x4cc9f0), D2D1::ColorF(0x7209b7), D2D1::ColorF(0xf72585) };
             g_layoutDirty = true;
             break;
         }
-        case ID_RAINBOW_SPEED_SLOW:   g_colorRainbowSpeed = 0.5f; Wh_SetIntValue(L"RainbowSpeed", 5); break;
-        case ID_RAINBOW_SPEED_NORMAL: g_colorRainbowSpeed = 1.0f; Wh_SetIntValue(L"RainbowSpeed", 10); break;
-        case ID_RAINBOW_SPEED_FAST:   g_colorRainbowSpeed = 2.0f; Wh_SetIntValue(L"RainbowSpeed", 20); break;
+        case ID_RAINBOW_SPEED_SLOW:   g_colorRainbowSpeed = 0.5f; break;
+        case ID_RAINBOW_SPEED_NORMAL: g_colorRainbowSpeed = 1.0f; break;
+        case ID_RAINBOW_SPEED_FAST:   g_colorRainbowSpeed = 2.0f; break;
         case ID_BUTTON_STYLE_DEFAULT:
             Wh_SetIntValue(L"ButtonStyle", 0);
             LoadSettings();
@@ -3730,9 +3824,6 @@ DWORD WINAPI RenderThreadProc(void*) {
     bool prevCtrlState = false;
     std::wstring lastFgApp;
     int lastMinute = -1;
-    
-    int cachedRefreshRate = 60;
-    double lastRefreshCheck = 0.0;
 
     while (WaitForSingleObject(g_stopEvent, 0) == WAIT_TIMEOUT) {
         MSG message = {};
@@ -3991,13 +4082,7 @@ DWORD WINAPI RenderThreadProc(void*) {
             nextFrameTarget = std::chrono::steady_clock::now();
         } else {
             int targetFps = cfg.targetFps;
-            if (targetFps <= 0) {
-                if (now - lastRefreshCheck > 5.0) {
-                    cachedRefreshRate = GetMonitorRefreshRate(hwnd);
-                    lastRefreshCheck = now;
-                }
-                targetFps = cachedRefreshRate;
-            }
+            if (targetFps <= 0) targetFps = GetMonitorRefreshRate(hwnd);
             targetFps = ClampInt(targetFps, 30, 1000);
             double targetFrameMs = 1000.0 / targetFps;
             
@@ -4069,9 +4154,11 @@ void StopThreads() {
     HANDLE handles[] = {g_renderThread, g_mediaThread};
     for (HANDLE h : handles) {
         if (h) {
-            // Ждём завершения потока. Если завис (например, на WinRT), просто бросаем хэндл.
-            // TerminateThread больше не используется во избежание дедлоков и утечек критических ресурсов.
-            WaitForSingleObject(h, 3000);
+            // Если ожидание проваливается (например, блокировка внутри COM/WinRT),
+            // TerminateThread предотвращает вызов освобожденной памяти после выгрузки DLL.
+            if (WaitForSingleObject(h, 3000) == WAIT_TIMEOUT) {
+                TerminateThread(h, 1);
+            }
             CloseHandle(h);
         }
     }
