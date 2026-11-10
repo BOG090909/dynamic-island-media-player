@@ -411,6 +411,9 @@ struct MediaSnapshot {
 
     std::shared_ptr<const BitmapPixels> art;
     std::shared_ptr<const BitmapPixels> sourceIcon;
+    // Обложка предыдущего трека для crossfade.
+    std::shared_ptr<const BitmapPixels> previousArt;
+    double artTransitionStartedAt = 0.0;
     double titleChangedAt = 0.0;
     double metaChangedAt = 0.0;
     double pausedAt = 0.0;
@@ -1486,6 +1489,7 @@ DWORD WINAPI MediaThreadProc(void*) {
     static double s_lastIconSearch = 0.0;
     static std::wstring s_preferredAumid;
     static double s_lastPlayingTime = 0.0;
+    static double s_lastAvailableTime = 0.0;
 
     while (WaitForSingleObject(g_stopEvent, 0) == WAIT_TIMEOUT) {
         MediaSnapshot prev;
@@ -1527,25 +1531,34 @@ DWORD WINAPI MediaThreadProc(void*) {
                 }
 
                 if (foundPlaying) {
+                    // Активно воспроизводимая сессия всегда имеет приоритет.
                     s_preferredAumid = session.SourceAppUserModelId().c_str();
                     s_lastPlayingTime = now;
                 } else {
-                    auto currentSystemSession = manager.GetCurrentSession();
-                    if (currentSystemSession && !sourceAllowed(currentSystemSession)) currentSystemSession = nullptr;
-                    std::wstring currentSystemAumid;
-                    if (currentSystemSession) currentSystemAumid = currentSystemSession.SourceAppUserModelId().c_str();
-
-                    if (!s_preferredAumid.empty() && currentSystemAumid != s_preferredAumid && (now - s_lastPlayingTime < 10.0)) {
+                    // Если ничего не воспроизводится, продолжаем использовать
+                    // последнее выбранное приложение, в том числе на паузе.
+                    if (!s_preferredAumid.empty()) {
                         for (auto const& candidate : manager.GetSessions()) {
-                            if (sourceAllowed(candidate) && candidate.SourceAppUserModelId().c_str() == s_preferredAumid) {
-                                session = candidate;
-                                break;
-                            }
+                            try {
+                                if (candidate && sourceAllowed(candidate) &&
+                                    EqualsNoCase(candidate.SourceAppUserModelId().c_str(),
+                                                 s_preferredAumid)) {
+                                    session = candidate;
+                                    break;
+                                }
+                            } catch (...) {}
                         }
                     }
-                    if (!session) {
-                        session = currentSystemSession;
-                        if (session) s_preferredAumid = session.SourceAppUserModelId().c_str();
+
+                    // Не переключаемся на CurrentSession браузера,
+                    // если ранее уже был выбран другой источник.
+                    if (!session && s_preferredAumid.empty()) {
+                        auto currentSystemSession = manager.GetCurrentSession();
+
+                        if (currentSystemSession && sourceAllowed(currentSystemSession)) {
+                            session = currentSystemSession;
+                            s_preferredAumid = session.SourceAppUserModelId().c_str();
+                        }
                     }
                 }
             }
@@ -1637,6 +1650,54 @@ DWORD WINAPI MediaThreadProc(void*) {
                     next.trackId = next.sourceAppUserModelId + L"|VLC_HACK|" + next.title;
                 }
 
+                // Получаем обложку текущего трека из Windows Media Session.
+                // Запрос не выполняется на каждом 200-мс цикле: если обложка
+                // временно недоступна, повторяем попытку не чаще одного раза в 2 сек.
+                const bool sameArtTrack = next.trackId == prev.trackId;
+                if (sameArtTrack) {
+                    next.art = prev.art;
+                    next.previousArt = prev.previousArt;
+                    next.artTransitionStartedAt = prev.artTransitionStartedAt;
+                } else {
+                    next.art.reset();
+                    next.previousArt = prev.art ? prev.art : prev.previousArt;
+                    next.artTransitionStartedAt = 0.0;
+                }
+
+                static std::wstring s_lastArtTrackId;
+                static double s_lastArtAttempt = 0.0;
+                const bool artTrackChanged = next.trackId != s_lastArtTrackId;
+                if (artTrackChanged) {
+                    s_lastArtTrackId = next.trackId;
+                    s_lastArtAttempt = 0.0;
+                }
+
+                if (!next.art && (artTrackChanged || now - s_lastArtAttempt >= 2.0)) {
+                    s_lastArtAttempt = now;
+                    try {
+                        auto thumbnail = properties.Thumbnail();
+                        if (thumbnail) {
+                            auto imageBytes = ReadWinRtStreamBytes(thumbnail);
+                            BitmapPixels decodedArt;
+                            if (DecodeImageBytesToPixels(imageBytes, &decodedArt)) {
+                                next.art = std::make_shared<const BitmapPixels>(std::move(decodedArt));
+                                if (next.previousArt) {
+                                    next.artTransitionStartedAt = now;
+                                }
+                            }
+                        }
+                    } catch (...) {
+                        // Не ломаем обновление метаданных, если источник не отдал обложку.
+                    }
+                }
+
+                // После завершения crossfade больше не храним предыдущую обложку.
+                if (next.art && next.artTransitionStartedAt > 0.0 &&
+                    now - next.artTransitionStartedAt >= 0.5) {
+                    next.previousArt.reset();
+                    next.artTransitionStartedAt = 0.0;
+                }
+
                 if (next.sourceAppUserModelId == prev.sourceAppUserModelId) {
                     next.sourceBadge = prev.sourceBadge;
                     next.sourceIcon = prev.sourceIcon;
@@ -1649,29 +1710,22 @@ DWORD WINAPI MediaThreadProc(void*) {
                     s_lastIconSearch = now;
                     next.sourceIcon = FindMediaSourceIcon(next.sourceAppUserModelId);
                 }
-
-                bool metadataChanged = (next.trackId != prev.trackId);
-                next.metaChangedAt = metadataChanged ? now : prev.metaChangedAt;
-
-                // Простой синхронный запрос обложки без фоновых потоков и кеша
-                if (metadataChanged || !prev.art) {
-                    try {
-                        auto thumbnailRef = properties.Thumbnail();
-                        if (thumbnailRef) {
-                            std::vector<uint8_t> bytes = ReadWinRtStreamBytes(thumbnailRef);
-                            BitmapPixels pixels;
-                            if (!bytes.empty() && DecodeImageBytesToPixels(bytes, &pixels)) {
-                                next.art = std::make_shared<const BitmapPixels>(std::move(pixels));
-                            }
-                        }
-                    } catch (...) {}
-                } else {
-                    next.art = prev.art;
-                }
             }
         } catch (...) {
             selectedSession = nullptr;
             manager = nullptr;
+        }
+
+        // Если Windows временно потеряла медиасессию,
+        // сохраняем последнее состояние на 3 секунды.
+        if (!next.available && prev.available &&
+            s_lastAvailableTime > 0.0 &&
+            (now - s_lastAvailableTime) < 3.0) {
+            next = prev;
+        }
+
+        if (next.available) {
+            s_lastAvailableTime = now;
         }
 
         bool trackChanged = false;
@@ -2054,6 +2108,7 @@ class Renderer {
         marqueeArtist_.layout.Reset();
         marqueeAlbum_.layout.Reset();
         artBitmap_.Reset();
+        transitionArtBitmap_.Reset();
         sourceIconBitmap_.Reset();
         accentBrush_.Reset();
         textBrush_.Reset();
@@ -2506,7 +2561,38 @@ class Renderer {
         const D2D1_RECT_F artRect = D2D1::RectF(rect.left + MediaLayout::kArtInsetX, rect.top + MediaLayout::kArtInsetY,
                                                 rect.left + MediaLayout::kArtInsetX + artSize,
                                                 rect.top + MediaLayout::kArtInsetY + artSize);
-        DrawAlbumArt(media, artRect, 16.0f, true);
+
+        const bool artTransition =
+            media.previousArt &&
+            media.art &&
+            media.artTransitionStartedAt > 0.0 &&
+            now >= media.artTransitionStartedAt &&
+            (now - media.artTransitionStartedAt) < 0.5;
+
+        if (artTransition) {
+            const float progress = Clamp(
+                static_cast<float>(
+                    (now - media.artTransitionStartedAt) / 0.5),
+                0.0f, 1.0f);
+
+            MediaSnapshot oldMedia = media;
+            oldMedia.art = media.previousArt;
+
+            // Старая обложка постепенно исчезает.
+            DrawAlbumArt(oldMedia, artRect, 16.0f, false,
+                         1.0f - progress, true);
+
+            // Новая постепенно появляется.
+            DrawAlbumArt(media, artRect, 16.0f, true,
+                         progress, false);
+        } else if (media.previousArt && !media.art) {
+            // Новая обложка ещё загружается — показываем старую.
+            MediaSnapshot oldMedia = media;
+            oldMedia.art = media.previousArt;
+            DrawAlbumArt(oldMedia, artRect, 16.0f, false);
+        } else {
+            DrawAlbumArt(media, artRect, 16.0f, true);
+        }
 
         const float clockW = 50.0f, clockH = 20.0f;
         const D2D1_RECT_F clockRect = D2D1::RectF(rect.right - 24.0f - clockW,
@@ -2517,18 +2603,25 @@ class Renderer {
         const float textLeft = artRect.right + 18.0f;
         const float textRight = clockRect.left - 16.0f;
 
+        const float textAlpha = artTransition
+            ? Clamp(static_cast<float>(
+                (now - media.artTransitionStartedAt) / 0.5), 0.0f, 1.0f)
+            : 1.0f;
+
+        textBrush_->SetOpacity(0.98f * textAlpha);
         DrawMarqueeText(media.title.empty() ? std::wstring(Tr(L"Невідомо", L"Неизвестно", L"Unknown")) : media.title,
                         D2D1::RectF(textLeft, rect.top + 34.0f, textRight, rect.top + 54.0f), textFormat_.Get(),
                         textBrush_.Get(), now, 42.0f, marqueeTitle_);
 
-        mutedBrush_->SetOpacity(0.80f);
+        mutedBrush_->SetOpacity(0.80f * textAlpha);
         DrawMarqueeText(media.artist, D2D1::RectF(textLeft, rect.top + 54.0f, textRight, rect.top + 74.0f),
                         smallTextFormat_.Get(), mutedBrush_.Get(), now, 30.0f, marqueeArtist_);
         if (!media.albumTitle.empty()) {
-            mutedBrush_->SetOpacity(0.70f);
+            mutedBrush_->SetOpacity(0.70f * textAlpha);
             DrawMarqueeText(media.albumTitle, D2D1::RectF(textLeft, rect.top + 68.0f, textRight, rect.top + 84.0f),
                             smallTextFormat_.Get(), mutedBrush_.Get(), now, 28.0f, marqueeAlbum_);
         }
+        textBrush_->SetOpacity(0.98f);
         mutedBrush_->SetOpacity(0.90f);
 
         DrawSystemClock(clockRect);
@@ -2767,7 +2860,10 @@ class Renderer {
         target_->DrawEllipse(D2D1::Ellipse(center, radius, radius), border.Get(), 1.0f);
     }
 
-    void DrawAlbumArt(const MediaSnapshot& media, D2D1_RECT_F rect, float radius, bool drawBadge) {
+    void DrawAlbumArt(const MediaSnapshot& media, D2D1_RECT_F rect,
+                      float radius, bool drawBadge,
+                      float artOpacity = 1.0f,
+                      bool transitionCache = false) {
         ComPtr<ID2D1RoundedRectangleGeometry> mask;
         d2dFactory_->CreateRoundedRectangleGeometry(D2D1::RoundedRect(rect, radius, radius), &mask);
         ComPtr<ID2D1Layer> layer;
@@ -2777,7 +2873,17 @@ class Renderer {
         else target_->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
         if (media.art && !media.art->bgra.empty()) {
-            DrawBitmapPixels(*media.art, rect, artBitmap_, artGeneration_, 1.0f);
+            if (transitionCache) {
+                DrawBitmapPixels(*media.art, rect,
+                                 transitionArtBitmap_,
+                                 transitionArtGeneration_,
+                                 artOpacity);
+            } else {
+                DrawBitmapPixels(*media.art, rect,
+                                 artBitmap_,
+                                 artGeneration_,
+                                 artOpacity);
+            }
         } else {
             accentBrush_->SetOpacity(0.24f);
             target_->FillRoundedRectangle(D2D1::RoundedRect(rect, radius, radius), accentBrush_.Get());
@@ -2866,8 +2972,10 @@ class Renderer {
     MarqueeLayoutCache marqueeArtist_;
     MarqueeLayoutCache marqueeAlbum_;
     ComPtr<ID2D1Bitmap> artBitmap_;
+    ComPtr<ID2D1Bitmap> transitionArtBitmap_;
     ComPtr<ID2D1Bitmap> sourceIconBitmap_;
     uint64_t artGeneration_ = 0;
+    uint64_t transitionArtGeneration_ = 0;
     uint64_t sourceIconGeneration_ = 0;
     float settingsOpacity_ = 0.96f;
     D2D1_COLOR_F pillBgColor_ = D2D1::ColorF(0.031f, 0.031f, 0.039f, 1.0f);
