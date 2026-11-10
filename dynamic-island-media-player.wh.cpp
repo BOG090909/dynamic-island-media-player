@@ -674,6 +674,17 @@ void SaveAppPositionsToRegistry() {
     Wh_SetStringValue(L"AppPositionsData", serialized.c_str());
 }
 
+void SaveRainbowPalette() {
+    std::lock_guard lock(g_rainbowMutex);
+    std::wstring s;
+    for (const auto& c : g_rainbowPalette) {
+        wchar_t hex[32];
+        swprintf_s(hex, L"#%02X%02X%02X,", static_cast<int>(c.r * 255), static_cast<int>(c.g * 255), static_cast<int>(c.b * 255));
+        s += hex;
+    }
+    Wh_SetStringValue(L"RainbowPalette", s.c_str());
+}
+
 D2D1_COLOR_F ColorFromHex(std::wstring text, D2D1_COLOR_F fallback) {
     const size_t first = text.find_first_not_of(L" \t\r\n");
     if (first == std::wstring::npos) return fallback;
@@ -1021,6 +1032,29 @@ void LoadSettings() {
         g_idleTimeoutSec = idleStr.empty() ? 0 : _wtoi(idleStr.c_str());
     }
     next.idleTimeoutSec = g_idleTimeoutSec.load();
+
+    // Загрузка палитры Rainbow
+    wchar_t palBuf[1024];
+    if (Wh_GetStringValue(L"RainbowPalette", palBuf, ARRAYSIZE(palBuf))) {
+        std::wstring s(palBuf);
+        std::vector<D2D1_COLOR_F> loaded;
+        size_t pos = 0;
+        while (pos < s.size()) {
+            size_t comma = s.find(L',', pos);
+            if (comma == std::wstring::npos) comma = s.size();
+            std::wstring hex = s.substr(pos, comma - pos);
+            if (!hex.empty()) {
+                loaded.push_back(ColorFromHex(hex, D2D1::ColorF(0)));
+            }
+            pos = comma + 1;
+        }
+        if (!loaded.empty()) {
+            std::lock_guard lock(g_rainbowMutex);
+            g_rainbowPalette = std::move(loaded);
+        }
+    }
+    int rSpeed = Wh_GetIntValue(L"RainbowSpeed", -1);
+    if (rSpeed != -1) g_colorRainbowSpeed = rSpeed / 10.0f;
 
     g_clickThrough = Wh_GetIntValue(L"ClickThrough", 0) != 0;
     g_disableAnimations = Wh_GetIntValue(L"DisableAnimations", 0) != 0;
@@ -1442,6 +1476,9 @@ DWORD WINAPI MediaThreadProc(void*) {
     static double s_lastIconSearch = 0.0;
     static double s_lastArtRequest = 0.0;
 
+    static std::wstring s_lastArtTitle;
+    static bool s_artFailed = false;
+
     while (WaitForSingleObject(g_stopEvent, 0) == WAIT_TIMEOUT) {
         MediaSnapshot prev;
         {
@@ -1537,18 +1574,27 @@ DWORD WINAPI MediaThreadProc(void*) {
 
                 const bool metadataChanged = (next.title != prev.title || next.artist != prev.artist);
                 next.metaChangedAt = metadataChanged ? now : prev.metaChangedAt;
+                
+                if (metadataChanged) {
+                    s_lastArtTitle = next.title;
+                    s_artFailed = false;
+                }
 
-                // Album Art Deco throttled to avoid spamming WIC on missing art
+                // Album Art Deco with caching state to avoid spamming WIC on missing art
                 if (!metadataChanged && prev.art) {
                     next.art = prev.art;
-                } else if (now - s_lastArtRequest > 1.5) {
+                } else if (!s_artFailed && now - s_lastArtRequest > 1.5) {
                     if (auto thumbnail = properties.Thumbnail()) {
                         s_lastArtRequest = now;
                         std::vector<uint8_t> bytes = ReadWinRtStreamBytes(thumbnail);
                         BitmapPixels decoded;
                         if (!bytes.empty() && DecodeImageBytesToPixels(bytes, &decoded)) {
                             next.art = std::make_shared<const BitmapPixels>(std::move(decoded));
+                        } else {
+                            s_artFailed = true; // Stop trying for this track
                         }
+                    } else {
+                        s_artFailed = true;
                     }
                 }
             }
@@ -3223,21 +3269,27 @@ void ShowSettingsMenu(HWND hwnd, POINT screenPoint) {
         case ID_ADD_RAINBOW_COLOR: {
             D2D1_COLOR_F newCol = D2D1::ColorF(0xff0000);
             if (PickColorWithDialog(hwnd, newCol)) {
-                std::lock_guard lock(g_rainbowMutex);
-                g_rainbowPalette.push_back(newCol);
+                {
+                    std::lock_guard lock(g_rainbowMutex);
+                    g_rainbowPalette.push_back(newCol);
+                }
+                SaveRainbowPalette();
                 g_layoutDirty = true;
             }
             break;
         }
         case ID_RESET_RAINBOW_COLORS: {
-            std::lock_guard lock(g_rainbowMutex);
-            g_rainbowPalette = { D2D1::ColorF(0x4cc9f0), D2D1::ColorF(0x7209b7), D2D1::ColorF(0xf72585) };
+            {
+                std::lock_guard lock(g_rainbowMutex);
+                g_rainbowPalette = { D2D1::ColorF(0x4cc9f0), D2D1::ColorF(0x7209b7), D2D1::ColorF(0xf72585) };
+            }
+            SaveRainbowPalette();
             g_layoutDirty = true;
             break;
         }
-        case ID_RAINBOW_SPEED_SLOW:   g_colorRainbowSpeed = 0.5f; break;
-        case ID_RAINBOW_SPEED_NORMAL: g_colorRainbowSpeed = 1.0f; break;
-        case ID_RAINBOW_SPEED_FAST:   g_colorRainbowSpeed = 2.0f; break;
+        case ID_RAINBOW_SPEED_SLOW:   g_colorRainbowSpeed = 0.5f; Wh_SetIntValue(L"RainbowSpeed", 5); break;
+        case ID_RAINBOW_SPEED_NORMAL: g_colorRainbowSpeed = 1.0f; Wh_SetIntValue(L"RainbowSpeed", 10); break;
+        case ID_RAINBOW_SPEED_FAST:   g_colorRainbowSpeed = 2.0f; Wh_SetIntValue(L"RainbowSpeed", 20); break;
         case ID_BUTTON_STYLE_DEFAULT:
             Wh_SetIntValue(L"ButtonStyle", 0);
             LoadSettings();
@@ -3678,6 +3730,9 @@ DWORD WINAPI RenderThreadProc(void*) {
     bool prevCtrlState = false;
     std::wstring lastFgApp;
     int lastMinute = -1;
+    
+    int cachedRefreshRate = 60;
+    double lastRefreshCheck = 0.0;
 
     while (WaitForSingleObject(g_stopEvent, 0) == WAIT_TIMEOUT) {
         MSG message = {};
@@ -3936,7 +3991,13 @@ DWORD WINAPI RenderThreadProc(void*) {
             nextFrameTarget = std::chrono::steady_clock::now();
         } else {
             int targetFps = cfg.targetFps;
-            if (targetFps <= 0) targetFps = GetMonitorRefreshRate(hwnd);
+            if (targetFps <= 0) {
+                if (now - lastRefreshCheck > 5.0) {
+                    cachedRefreshRate = GetMonitorRefreshRate(hwnd);
+                    lastRefreshCheck = now;
+                }
+                targetFps = cachedRefreshRate;
+            }
             targetFps = ClampInt(targetFps, 30, 1000);
             double targetFrameMs = 1000.0 / targetFps;
             
@@ -4008,11 +4069,9 @@ void StopThreads() {
     HANDLE handles[] = {g_renderThread, g_mediaThread};
     for (HANDLE h : handles) {
         if (h) {
-            // Если ожидание проваливается (например, блокировка внутри COM/WinRT),
-            // TerminateThread предотвращает вызов освобожденной памяти после выгрузки DLL.
-            if (WaitForSingleObject(h, 3000) == WAIT_TIMEOUT) {
-                TerminateThread(h, 1);
-            }
+            // Ждём завершения потока. Если завис (например, на WinRT), просто бросаем хэндл.
+            // TerminateThread больше не используется во избежание дедлоков и утечек критических ресурсов.
+            WaitForSingleObject(h, 3000);
             CloseHandle(h);
         }
     }
