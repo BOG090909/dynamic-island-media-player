@@ -26,6 +26,14 @@ furnished to do so, subject to the following conditions:
 
 The above copyright notice and this permission notice shall be included in all
 copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 */
 
 // ==WindhawkModReadme==
@@ -41,7 +49,7 @@ This mod is a specialized, lightweight adaptation of the incredible **[Dynamic I
 ## Key Features
 - **Context Menu Priority:** The right-click context menu acts as the primary configuration source. Settings changed here persistently override default Windhawk configurations.
 - **Smart Media Tracking:** Real-time track metadata, album art, app badges, and progress scrubbing via Windows System Media Transport.
-- **Resource Efficient:** Event-driven render sleeping and direct DWM/DPI API calls to guarantee ultra-low CPU/GPU consumption.
+- **Optimized Rendering:** Hybrid event-driven architecture with intelligent sleep throttling guarantees ultra-low CPU/GPU consumption.
 - **Per-App Dynamic Screen Positioning:** Supports saving unique screen positions on a per-application basis.
 - **Trilingual Localized UI (UA / RU / EN):** Full native support for Ukrainian, Russian, and English.
 
@@ -632,9 +640,12 @@ bool PickColorWithDialog(HWND owner, D2D1_COLOR_F& outColor) {
 void LoadAppPositionsFromRegistry() {
     std::lock_guard lock(g_appPosMutex);
     g_appPositions.clear();
-    wchar_t buf[4096] = {0};
-    if (Wh_GetStringValue(L"AppPositionsData", buf, ARRAYSIZE(buf))) {
-        std::wstring str(buf);
+    
+    const int bufSize = 32768; // Безопасный увеличенный размер буфера
+    auto buf = std::make_unique<wchar_t[]>(bufSize);
+    
+    if (Wh_GetStringValue(L"AppPositionsData", buf.get(), bufSize)) {
+        std::wstring str(buf.get());
         size_t start = 0;
         while (start < str.size()) {
             size_t end = str.find(L';', start);
@@ -900,7 +911,7 @@ void LoadSettings() {
         if (end != scale.c_str() && parsed > 0.1f && parsed < 10.0f) next.baseSizeScale = parsed;
     }
     
-    // We don't pre-multiply DPI here anymore, it's done dynamically in RenderThreadProc
+    // Scale is calculated dynamically in RenderThreadProc based on active monitor
     next.sizeScale = next.baseSizeScale; 
 
     const std::wstring mon = GetStringSettingCopy(L"Appearance.TargetMonitor");
@@ -1767,7 +1778,6 @@ MediaContentPoint MediaContentFromClient(int clientX, int clientY) {
         if (g_mediaHitSeq.load(std::memory_order_relaxed) == before) break;
         stamp = 0;
     }
-    // Убрано ограничение stamp в 500мс для стабильной работы кликов после простоя
     if (stamp == 0) return out;
     if (scale < 0.05f) scale = 1.0f;
 
@@ -3703,10 +3713,25 @@ DWORD WINAPI RenderThreadProc(void*) {
 
         Settings cfg = GetSettingsCopy();
         
-        // Динамическое вычисление DPI
+        bool hasAppPos = false;
+        int appX = 0, appY = 0;
+        if (!currentFgApp.empty()) {
+            std::lock_guard lock(g_appPosMutex);
+            auto it = g_appPositions.find(currentFgApp);
+            if (it != g_appPositions.end()) {
+                hasAppPos = true;
+                appX = it->second.centerX;
+                appY = it->second.top;
+            }
+        }
+
+        // Динамическое вычисление DPI с учётом привязки к приложению
         if (Wh_GetIntSetting(L"Appearance.AutoDpiScale") != 0) {
             HMONITOR targetMon = nullptr;
-            if (g_customPosSet.load()) {
+            if (hasAppPos) {
+                POINT pt = {appX, appY};
+                targetMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+            } else if (g_customPosSet.load()) {
                 POINT pt = {g_customCenterX.load(), g_customTop.load()};
                 targetMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
             } else {
@@ -3897,13 +3922,8 @@ DWORD WINAPI RenderThreadProc(void*) {
                             pinned, now, isInteracting);
         }
 
-        int targetFps = cfg.targetFps;
-        if (targetFps <= 0) targetFps = GetMonitorRefreshRate(hwnd);
-        targetFps = ClampInt(targetFps, 30, 1000);
-        double targetFrameMs = 1000.0 / targetFps;
-
         if (!needsRender) {
-            DWORD sleepTime = 250; // Кап ожидания в 250 мс для отзывчивости
+            DWORD sleepTime = 250; 
             if (wantVisible && !parked) {
                 SYSTEMTIME stTime;
                 GetLocalTime(&stTime);
@@ -3915,6 +3935,11 @@ DWORD WINAPI RenderThreadProc(void*) {
             MsgWaitForMultipleObjects(1, &g_stopEvent, FALSE, sleepTime, QS_ALLINPUT);
             nextFrameTarget = std::chrono::steady_clock::now();
         } else {
+            int targetFps = cfg.targetFps;
+            if (targetFps <= 0) targetFps = GetMonitorRefreshRate(hwnd);
+            targetFps = ClampInt(targetFps, 30, 1000);
+            double targetFrameMs = 1000.0 / targetFps;
+            
             nextFrameTarget += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                 std::chrono::duration<double, std::milli>(targetFrameMs));
             
@@ -3923,10 +3948,10 @@ DWORD WINAPI RenderThreadProc(void*) {
                 if (nowTime >= nextFrameTarget) break;
                 if (WaitForSingleObject(g_stopEvent, 0) != WAIT_TIMEOUT) break;
                 const double remainingMs = std::chrono::duration<double, std::milli>(nextFrameTarget - nowTime).count();
-                if (remainingMs > 2.0) {
+                if (remainingMs > 1.0) {
                     Sleep(1);
                 } else {
-                    std::this_thread::yield();
+                    Sleep(0);
                 }
             }
         }
@@ -3957,8 +3982,23 @@ bool StartThreads() {
     if (!g_stopEvent) return false;
 
     g_renderThread = CreateThread(nullptr, 0, RenderThreadProc, nullptr, 0, nullptr);
-    if (!g_renderThread) return false;
+    if (!g_renderThread) {
+        CloseHandle(g_stopEvent);
+        g_stopEvent = nullptr;
+        return false;
+    }
+    
     g_mediaThread = CreateThread(nullptr, 0, MediaThreadProc, nullptr, 0, nullptr);
+    if (!g_mediaThread) {
+        SetEvent(g_stopEvent);
+        WaitForSingleObject(g_renderThread, INFINITE);
+        CloseHandle(g_renderThread);
+        g_renderThread = nullptr;
+        CloseHandle(g_stopEvent);
+        g_stopEvent = nullptr;
+        return false;
+    }
+    
     return true;
 }
 
@@ -3968,7 +4008,11 @@ void StopThreads() {
     HANDLE handles[] = {g_renderThread, g_mediaThread};
     for (HANDLE h : handles) {
         if (h) {
-            WaitForSingleObject(h, 3000);
+            // Если ожидание проваливается (например, блокировка внутри COM/WinRT),
+            // TerminateThread предотвращает вызов освобожденной памяти после выгрузки DLL.
+            if (WaitForSingleObject(h, 3000) == WAIT_TIMEOUT) {
+                TerminateThread(h, 1);
+            }
             CloseHandle(h);
         }
     }
