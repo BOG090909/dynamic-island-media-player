@@ -26,14 +26,6 @@ furnished to do so, subject to the following conditions:
 
 The above copyright notice and this permission notice shall be included in all
 copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 */
 
 // ==WindhawkModReadme==
@@ -52,10 +44,6 @@ This mod is a specialized, lightweight adaptation of the incredible **[Dynamic I
 - **Optimized Rendering:** Hybrid event-driven architecture with intelligent sleep throttling guarantees ultra-low CPU/GPU consumption.
 - **Per-App Dynamic Screen Positioning:** Supports saving unique screen positions on a per-application basis.
 - **Trilingual Localized UI (UA / RU / EN):** Full native support for Ukrainian, Russian, and English.
-
-## Credits & Acknowledgements
-- **Himanshu (devcode90)** - For the original Dynamic Island for Windows framework, rendering physics, and core UI design.
-- **BOG090909** - Standalone media player adaptation, custom app-positioning logic, multilingual support, and optimization.
 */
 // ==/WindhawkModReadme==
 
