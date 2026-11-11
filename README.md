@@ -48,6 +48,10 @@ The **Disable player animations** option affects the island's hover and movement
 * **BOG090909:** Standalone media-player adaptation, per-app positioning, customization features, localization, playback integration, and performance improvements.
 
 
+
+
+
+
 ![Ukraine](https://thumb.wikimedia.org/wikipedia/commons/thumb/4/49/Flag_of_Ukraine.svg/250px-Flag_of_Ukraine.svg.png?utm_source=ru.wikipedia.org&utm_campaign=parser&utm_content=thumbnail)
 # Динамічний острів медіаплеєра для Windows
 
