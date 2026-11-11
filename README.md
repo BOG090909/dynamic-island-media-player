@@ -1,101 +1,119 @@
-Englis
-
-![English](https://thumb.wikimedia.org/wikipedia/commons/thumb/a/a5/Flag_of_the_United_Kingdom_%281-2%29.svg/250px-Flag_of_the_United_Kingdom_%281-2%29.svg.png?utm_source=ru.wikipedia.org&utm_campaign=parser&utm_content=thumbnail)
 # Dynamic Island Media Player for Windows
 
-![Dynamic Island Preview](https://raw.githubusercontent.com/BOG090909/dynamic-island-media-player/main/assets/preview.png)
-A focused, customizable Dynamic Island overlay for Windows that becomes an interactive media player when music or video is playing. This standalone mod is based on the original [Dynamic Island for Windows](https://github.com/devcode90/Dynamic-Island-for-Windows), but removes unrelated dashboard modules and concentrates on media playback.
+A customizable Dynamic Island overlay for Windows that transforms into an interactive media player when music or video is playing.
 
-## Features
+This project is based on the original [Dynamic Island for Windows](https://github.com/devcode90/Dynamic-Island-for-Windows) by Himanshu (devcode90). It removes unrelated dashboard modules and focuses on media playback, while adding new customization options and functionality.
 
-### Media playback
+**Languages:** [English](#english) · [Українська](#українська)
 
-* Reads the current media session through Windows System Media Transport Controls.
-* Displays track title, artist, album, source-app badge, album artwork, and playback state.
-* Provides play/pause, previous-track, and next-track controls.
-* Supports progress display and scrubbing.
-* Lets you choose the track-change animation: **Fade** (crossfade) or **Slide** (horizontal slide).
-* Keeps track-change transitions independent from the option that disables the island's hover and movement animations.
-* Refreshes album artwork when the track, artist, or album identity changes, and scales large artwork for display.
+![Dynamic Island Preview](assets/preview.png)
 
-### Interaction and window behavior
+---
 
-* Expands on hover, with configurable behavior.
-* Supports click-through mode; hold **Ctrl** to interact with the island.
-* Provides configurable hotkeys for show/hide, next track, previous track, and play/pause.
-* Supports per-application saved positions, so the island can appear at different locations for different apps.
-* Includes always-on-top, above-games, taskbar-layering, and fullscreen options.
-* Provides a right-click context menu for quick access to settings and playback-related options.
+## English
 
-### Appearance and customization
+![English](https://thumb.wikimedia.org/wikipedia/commons/thumb/a/a5/Flag_of_the_United_Kingdom_%281-2%29.svg/250px-Flag_of_the_United_Kingdom_%281-2%29.svg.png?utm_source=ru.wikipedia.org&utm_campaign=parser&utm_content=thumbnail)
 
-* Multiple island shapes, including the default pill, Windows 11-style rounded box, and top-edge notch.
-* Adjustable size, text scale, font, target monitor, and screen offsets.
-* Theme presets and separate background, primary-text, and secondary-text colors.
-* Accent color modes: automatic from album artwork, system accent, or custom color.
-* User-managed color-morphing palette with add/remove/reset controls and adjustable speed.
-* Configurable button style, shadow, and window opacity.
-* Ukrainian, Russian, and English interface languages.
-* Optional media-source filtering.
+### Features
 
-## Context menu and settings
+#### Media playback
+- Reads the current media session through Windows System Media Transport Controls.
+- Displays track title, artist, album, source application, album artwork, and playback state.
+- Provides play/pause, previous-track, and next-track controls.
+- Supports playback progress display and scrubbing.
+- Offers two track-transition styles: **Fade** (crossfade) and **Slide** (horizontal slide).
+- Keeps track-transition animations independent of the option that disables the island's hover and movement animations.
+- Refreshes album artwork when the track, artist, or album changes and scales large images for display.
 
-Right-click the island to open its context menu. The menu includes window behavior, idle/paused visibility, opacity, color settings, color morphing, track-transition style, button style, language, animation and shadow options, hotkeys, media-source filtering, and per-app position controls.
+#### Interaction and window behavior
+- Expands on hover with configurable behavior.
+- Supports click-through mode. Hold **Ctrl** to interact with the island.
+- Provides configurable hotkeys for showing/hiding the island, changing tracks, and controlling playback.
+- Supports per-application saved positions, allowing the island to appear in different locations depending on the active application.
+- Includes always-on-top, above-games, taskbar-layering, and fullscreen options.
+- Provides a right-click context menu for quick access to settings and playback controls.
 
-The **Disable player animations** option affects the island's hover and movement animations. It does not disable Fade or Slide transitions between tracks.
+#### Appearance and customization
+- Multiple island shapes: the default pill, a Windows 11-style rounded box, and a top-edge notch.
+- Adjustable size, text scale, font, target monitor, and screen offsets.
+- Theme presets and independently configurable background, primary-text, and secondary-text colors.
+- Accent color modes: automatic color extraction from album artwork, system accent color, or a custom color.
+- Customizable color-morphing palette with add, remove, and reset controls, as well as adjustable animation speed.
+- Configurable button styles, shadows, and window opacity.
+- Interface available in Ukrainian, Russian, and English.
+- Optional media-source filtering.
 
-## Credits
+### Installation
 
-* **Himanshu (devcode90):** Original Dynamic Island for Windows framework, rendering foundation, and core interface design.
-* **BOG090909:** Standalone media-player adaptation, per-app positioning, customization features, localization, playback integration, and performance improvements.
-  
-Ukraine
+1. Install [Windhawk](https://windhawk.net/).
+2. Download the [`dynamic-island-media-player.wh.cpp`](dynamic-island-media-player.wh.cpp) source file from this repository.
+3. Open Windhawk and create a new mod using the downloaded source code.
+4. Save and apply the mod.
+
+### Context menu and settings
+
+Right-click the island to open its context menu.
+
+The menu provides access to window behavior, idle and paused visibility, opacity, color settings, color morphing, track-transition styles, button styles, language, animation and shadow options, hotkeys, media-source filtering, and per-application position controls.
+
+**Note:** The **Disable player animations** option affects the island's hover and movement animations. It does not disable Fade or Slide transitions between tracks.
+
+### Credits
+
+- **Himanshu (devcode90):** Original Dynamic Island for Windows framework, rendering foundation, and core interface design.
+- **BOG090909:** Standalone media-player adaptation, per-application positioning, customization features, localization, playback integration, and performance improvements.
+
+---
+
+## Українська
 
 ![Ukraine](https://thumb.wikimedia.org/wikipedia/commons/thumb/4/49/Flag_of_Ukraine.svg/250px-Flag_of_Ukraine.svg.png?utm_source=ru.wikipedia.org&utm_campaign=parser&utm_content=thumbnail)
-# Динамічний острів медіаплеєра для Windows
 
-![Dynamic Island Preview](https://raw.githubusercontent.com/BOG090909/dynamic-island-media-player/main/assets/preview.png)
-Сфокусований і настроюваний оверлей Dynamic Island для Windows, який перетворюється на інтерактивний медіаплеєр під час відтворення музики чи відео. Цей самостійний мод створено на основі оригінального проєкту [Dynamic Island for Windows](https://github.com/devcode90/Dynamic-Island-for-Windows), але в ньому видалено зайві модулі інформаційної панелі та зосереджено увагу виключно на відтворенні медіафайлів.
+### Можливості
 
-## Можливості
+#### Відтворення медіа
+- Отримання інформації про поточну медіасесію через Windows System Media Transport Controls.
+- Відображення назви треку, виконавця, альбому, вихідної програми, обкладинки та стану відтворення.
+- Кнопки відтворення/паузи, попереднього та наступного треків.
+- Відображення прогресу відтворення та перемотування.
+- Два стилі переходу між треками: **Fade** (плавне згасання) та **Slide** (горизонтальний зсув).
+- Анімації переходу між треками працюють незалежно від налаштування, яке вимикає анімації наведення та переміщення острова.
+- Оновлення обкладинки при зміні треку, виконавця або альбому, а також масштабування великих зображень.
 
-### Відтворення медіа
+#### Взаємодія та поведінка вікна
+- Розгортання при наведенні з можливістю налаштування поведінки.
+- Режим ігнорування кліків (click-through). Утримуйте **Ctrl**, щоб взаємодіяти з островом.
+- Настроювані гарячі клавіші для показу/приховування острова, перемикання треків та керування відтворенням.
+- Збереження окремих позицій для різних програм, завдяки чому острів може відображатися в різних місцях залежно від активної програми.
+- Налаштування відображення поверх усіх вікон, поверх ігор, над панеллю завдань та у повноекранному режимі.
+- Контекстне меню, яке відкривається правою кнопкою миші та надає швидкий доступ до налаштувань і керування відтворенням.
 
-* Читання поточної медіасесії через Windows System Media Transport Controls.
-* Відображення назви треку, виконавця, альбому, значка вихідної програми, обкладинки альбому та стану відтворення.
-* Надання елементів керування відтворенням/паузою, попереднім і наступним треками.
-* Підтримка відображення прогресу та перемотування (скрубінгу).
-* Можливість вибору анімації зміни треку: **Згасання** (кросфейд) або **Зсув** (горизонтальне перегортання).
-* Збереження незалежності переходів між треками від опції, яка вимикає анімацію наведення та переміщення острова.
-* Оновлення обкладинки альбому у разі зміни треку, виконавця або альбому, а також масштабування великих зображень для відображення.
+#### Зовнішній вигляд та кастомізація
+- Кілька форм острова: стандартна пігулка, заокруглений блок у стилі Windows 11 та виріз на верхньому краї екрана.
+- Налаштування розміру, масштабу тексту, шрифту, цільового монітора та зміщення на екрані.
+- Готові теми та окреме налаштування кольорів фону, основного й додаткового тексту.
+- Режими акцентного кольору: автоматичне визначення з обкладинки, системний акцент або власний колір.
+- Власна палітра плавного переливання кольорів із можливістю додавання, видалення та скидання кольорів, а також налаштування швидкості анімації.
+- Налаштування стилю кнопок, тіні та прозорості вікна.
+- Українська, російська та англійська мови інтерфейсу.
+- Додаткова фільтрація джерел медіа.
 
-### Взаємодія та поведінка вікна
+### Встановлення
 
-* Розгортання при наведенні з можливістю налаштування поведінки.
-* Підтримка режиму «клік крізь вікно» (click-through); утримуйте **Ctrl** для взаємодії з островом.
-* Настроювані гарячі клавіші для приховування/показу, наступного треку, попереднього треку та відтворення/паузи.
-* Підтримка збережених позицій для кожного додатка окремо, завдяки чому острів може з'являтися в різних місцях залежно від запущеної програми.
-* Наявність опцій «поверх усіх вікон», поверх ігор, шарів панелі завдань та повноекранного режиму.
-* Контекстне меню правою кнопкою миші для швидкого доступу до налаштувань і параметрів керування відтворенням.
+1. Встановіть [Windhawk](https://windhawk.net/).
+2. Завантажте файл [`dynamic-island-media-player.wh.cpp`](dynamic-island-media-player.wh.cpp) із цього репозиторію.
+3. Відкрийте Windhawk та створіть новий мод, використовуючи завантажений вихідний код.
+4. Збережіть та застосуйте мод.
 
-### Зовнішній вигляд та кастомізація
+### Контекстне меню та налаштування
 
-* Кілька форм острова, зокрема стандартна пігулка, заокруглений блок у стилі Windows 11 та виріз на верхньому краї (notch).
-* Регулювання розміру, масштабу тексту, шрифту, цільового монітора та зміщень на екрані.
-* Пресети тем та окремі кольори для фону, основного тексту й вторинного тексту.
-* Режими акцентного кольору: автоматичний з обкладинки треку, системний акцент або власний колір.
-* Керована користувачем палітра злиття кольорів (колірного переливання) з елементами додавання/видалення/скидання та регулюванням швидкості.
-* Настроювані стилі кнопок, тінь та прозорість вікна.
-* Українська, російська та англійська мови інтерфейсу.
-* Додаткова фільтрація медіaджерел.
+Клацніть правою кнопкою миші по острову, щоб відкрити контекстне меню.
 
-## Контекстне меню та налаштування
+У ньому доступні налаштування поведінки вікна, видимості під час паузи або відсутності активного відтворення, прозорості, кольорів, переливання кольорів, стилю переходу між треками, стилю кнопок, мови, анімацій і тіней, гарячих клавіш, фільтрації джерел медіа та позицій для окремих програм.
 
-Клацніть правою кнопкою миші по острову, щоб відкрити контекстне меню. Воно містить параметри поведінки вікна, видимості під час паузи чи неактивності, прозорості, кольорів, переливання кольорів, стилю переходу треків, стилю кнопок, мови, анімації та тіней, гарячих клавіш, фільтрації джерел медіа та керування позиціями для конкретних додатків.
+**Примітка:** Опція **Disable player animations** впливає на анімації наведення та переміщення острова. Вона не вимикає переходи Fade або Slide між треками.
 
-Опція **Вимкнути анімації плеєра** впливає на анімацію наведення та переміщення острова. Вона не вимикає переходи (згасання або зсув) між треками.
+### Подяки та автори
 
-## Подяки та автори
-
-* **Himanshu (devcode90):** Оригінальний фреймворк Dynamic Island for Windows, фундамент рендерингу та дизайн інтерфейсу.
-* **BOG090909:** Адаптація самостійного медіаплеєра, позиціонування для окремих додатків, функції кастомізації, локалізація, інтеграція відтворення та покращення продуктивності.
+- **Himanshu (devcode90):** оригінальний фреймворк Dynamic Island for Windows, основа системи рендерингу та дизайн інтерфейсу.
+- **BOG090909:** адаптація самостійного медіаплеєра, позиціонування для окремих програм, функції кастомізації, локалізація, інтеграція відтворення та покращення продуктивності.
