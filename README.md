@@ -1,7 +1,7 @@
-[English](https://thumb.wikimedia.org/wikipedia/commons/thumb/a/a5/Flag_of_the_United_Kingdom_%281-2%29.svg/250px-Flag_of_the_United_Kingdom_%281-2%29.svg.png?utm_source=ru.wikipedia.org&utm_campaign=parser&utm_content=thumbnail)
+![English](https://thumb.wikimedia.org/wikipedia/commons/thumb/a/a5/Flag_of_the_United_Kingdom_%281-2%29.svg/250px-Flag_of_the_United_Kingdom_%281-2%29.svg.png?utm_source=ru.wikipedia.org&utm_campaign=parser&utm_content=thumbnail)
 # Dynamic Island Media Player for Windows
 
-A focused, customizable Dynamic Island overlay for Windows that becomes an interactive media player when music or video is playing. This standalone mod is based on the original [Dynamic Island for Windows](https://github.com/devcode90/Dynamic-Island-for-Windows), but removes unrelated dashboard modules and concentrates on media playback.
+A focused, customizable Dynamic Island overlay for Windows that becomes an interactive media player when music or video is playing. This standalone mod is based on the original ![Dynamic Island for Windows](https://github.com/devcode90/Dynamic-Island-for-Windows), but removes unrelated dashboard modules and concentrates on media playback.
 
 ## Features
 
@@ -47,10 +47,10 @@ The **Disable player animations** option affects the island's hover and movement
 * **BOG090909:** Standalone media-player adaptation, per-app positioning, customization features, localization, playback integration, and performance improvements.
 
 
-[Ukraine](https://thumb.wikimedia.org/wikipedia/commons/thumb/4/49/Flag_of_Ukraine.svg/960px-Flag_of_Ukraine.svg.png?utm_source=commons.wikimedia.org&utm_campaign=index&utm_content=thumbnail&_=20230624202942)
+![Ukraine](https://thumb.wikimedia.org/wikipedia/commons/thumb/4/49/Flag_of_Ukraine.svg/960px-Flag_of_Ukraine.svg.png?utm_source=commons.wikimedia.org&utm_campaign=index&utm_content=thumbnail&_=20230624202942)
 # Динамічний острів медіаплеєра для Windows
 
-Сфокусований і настроюваний оверлей Dynamic Island для Windows, який перетворюється на інтерактивний медіаплеєр під час відтворення музики чи відео. Цей самостійний мод створено на основі оригінального проєкту [Dynamic Island for Windows](https://github.com/devcode90/Dynamic-Island-for-Windows), але в ньому видалено зайві модулі інформаційної панелі та зосереджено увагу виключно на відтворенні медіафайлів.
+Сфокусований і настроюваний оверлей Dynamic Island для Windows, який перетворюється на інтерактивний медіаплеєр під час відтворення музики чи відео. Цей самостійний мод створено на основі оригінального проєкту ![Dynamic Island for Windows](https://github.com/devcode90/Dynamic-Island-for-Windows), але в ньому видалено зайві модулі інформаційної панелі та зосереджено увагу виключно на відтворенні медіафайлів.
 
 ## Можливості
 
