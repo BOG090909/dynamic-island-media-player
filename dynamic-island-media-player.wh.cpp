@@ -4804,8 +4804,9 @@ DWORD WINAPI RenderThreadProc(void*) {
     bool prevPlaying = false;
     bool prevCtrlState = false;
     std::wstring lastFgApp;
+    double lastForegroundCheck = -1.0;
     int lastMinute = -1;
-    
+
     int cachedRefreshRate = 60;
     double lastRefreshCheck = 0.0;
 
@@ -4828,11 +4829,17 @@ DWORD WINAPI RenderThreadProc(void*) {
         const double now = NowSeconds();
         StopHotkeyCaptureIfDone();
 
-        std::wstring currentFgApp = GetForegroundExeName();
-        if (currentFgApp != lastFgApp) {
-            lastFgApp = currentFgApp;
-            g_layoutDirty = true;
+        // Resolving the foreground process requires window/process queries.
+        // Per-app positioning does not need this work on every rendered frame.
+        if (lastForegroundCheck < 0.0 || now - lastForegroundCheck >= 0.25) {
+            lastForegroundCheck = now;
+            std::wstring detectedFgApp = GetForegroundExeName();
+            if (detectedFgApp != lastFgApp) {
+                lastFgApp = std::move(detectedFgApp);
+                g_layoutDirty = true;
+            }
         }
+        const std::wstring& currentFgApp = lastFgApp;
 
         SYSTEMTIME st;
         GetLocalTime(&st);
@@ -4976,7 +4983,7 @@ DWORD WINAPI RenderThreadProc(void*) {
                 g_pressedMediaButton.load() != -1 ||
                 g_dragging.load() ||
                 (g_colorRainbowEnabled.load() && snapshot.media.playing) ||
-                renderer.IsAnimationActive(widthSpring.value / cfg.sizeScale)) {
+                (expanded && renderer.IsAnimationActive(widthSpring.value / cfg.sizeScale))) {
                 needsRender = true;
             }
         }
@@ -5088,7 +5095,10 @@ DWORD WINAPI RenderThreadProc(void*) {
                     cachedRefreshRate = GetMonitorRefreshRate(hwnd);
                     lastRefreshCheck = now;
                 }
-                targetFps = cachedRefreshRate;
+                // Keep Auto mode lightweight like the known-good 1.3.5
+                // renderer: continuous animation is capped at 60 FPS.
+                // Higher refresh rates remain available as explicit settings.
+                targetFps = std::min(cachedRefreshRate, 60);
             }
             targetFps = ClampInt(targetFps, 30, 1000);
             double targetFrameMs = 1000.0 / targetFps;
