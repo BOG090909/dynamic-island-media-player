@@ -4809,6 +4809,9 @@ DWORD WINAPI RenderThreadProc(void*) {
 
     int cachedRefreshRate = 60;
     double lastRefreshCheck = 0.0;
+    HMONITOR cachedDpiMonitor = nullptr;
+    float cachedDpiScale = 1.0f;
+    double lastDpiCheck = -1.0;
 
     while (WaitForSingleObject(g_stopEvent, 0) == WAIT_TIMEOUT) {
         MSG message = {};
@@ -4874,7 +4877,16 @@ DWORD WINAPI RenderThreadProc(void*) {
                 targetMon = g_targetMonitor.load();
                 if (!targetMon) targetMon = ResolveTargetMonitor(cfg.targetMonitor);
             }
-            cfg.sizeScale = cfg.baseSizeScale * GetMonitorDpiScale(targetMon);
+            // Monitor DPI is stable for long periods. Avoid querying it on
+            // every render-loop iteration; refresh on monitor changes or once
+            // per second so display-scale changes are still picked up.
+            if (targetMon != cachedDpiMonitor || lastDpiCheck < 0.0 ||
+                now - lastDpiCheck >= 1.0) {
+                cachedDpiMonitor = targetMon;
+                cachedDpiScale = GetMonitorDpiScale(targetMon);
+                lastDpiCheck = now;
+            }
+            cfg.sizeScale = cfg.baseSizeScale * cachedDpiScale;
         } else {
             cfg.sizeScale = cfg.baseSizeScale;
         }
