@@ -2,7 +2,7 @@
 // @id             dynamic-island-media-player
 // @name           Dynamic Island Media Player
 // @description    A dedicated, standalone Dynamic Island media player for Windows. Forked and optimized from 'Dynamic Island for Windows' by devcode90. Features per-app positioning, custom color morphing, multilingual UI, and optimized rendering.
-// @version        1.6.0
+// @version        1.6.1
 // @author         BOG090909
 // @github         https://github.com/BOG090909
 // @homepage       https://github.com/BOG090909/dynamic-island-media-player
@@ -129,8 +129,9 @@ A focused, customizable Dynamic Island overlay for Windows that becomes an inter
 - Animations:
   - TargetFPS: auto
     $name: Refresh rate / FPS
+    $description: Auto caps continuous animation at 60 FPS. Select an explicit rate for higher-refresh displays.
     $options:
-      - auto: Auto
+      - auto: Auto (up to 60 FPS)
       - '60': 60 FPS
       - '120': 120 FPS
       - '144': 144 FPS
@@ -500,6 +501,9 @@ std::atomic<bool> g_settingsMenuOpen{false};
 std::atomic<HWND> g_foregroundBeforeSettingsMenu{nullptr};
 
 std::atomic<bool> g_layoutDirty{true};
+// Redrawing content does not necessarily require moving/resizing the overlay.
+// Keep window placement updates separate to avoid SetWindowPos on color/hover animations.
+std::atomic<bool> g_windowPositionDirty{true};
 std::atomic<bool> g_clickExpanded{false};
 std::atomic<int> g_pressedMediaButton{-1};
 std::atomic<int> g_hoveredMediaButton{-1};
@@ -1371,6 +1375,7 @@ void LoadSettings() {
         g_settings = std::move(next);
     }
     g_layoutDirty = true;
+    g_windowPositionDirty = true;
     HWND hSelf = g_hwnd.load();
     if (hSelf) {
         PostMessageW(hSelf, WM_APP_APPLY_HOTKEY, 0, 0);
@@ -1453,6 +1458,17 @@ void PositionOverlayWindow(HWND hwnd, int width, int height, const Settings& s) 
                                  : HWND_NOTOPMOST;
     SetWindowPos(hwnd, insertAfter, x, y, width, height,
                  SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+}
+
+uint64_t HashArtworkBytes(const std::vector<uint8_t>& bytes) {
+    // FNV-1a is inexpensive and lets the media thread skip WIC decoding when a
+    // provider keeps returning the same (possibly not-yet-updated) thumbnail.
+    uint64_t hash = 14695981039346656037ull;
+    for (const uint8_t byte : bytes) {
+        hash ^= byte;
+        hash *= 1099511628211ull;
+    }
+    return hash;
 }
 
 bool DecodeImageBytesToPixels(const std::vector<uint8_t>& bytes, BitmapPixels* outPixels) {
@@ -2043,39 +2059,59 @@ DWORD WINAPI MediaThreadProc(void*) {
                 static std::wstring s_lastArtTrackKey;
                 static double s_lastArtAttempt = 0.0;
                 static double s_artTrackFirstAttempt = 0.0;
+                static uint64_t s_lastArtBytesHash = 0;
+                static bool s_hasLastArtBytesHash = false;
                 const bool artTrackChanged = next.artTrackKey != s_lastArtTrackKey;
                 if (artTrackChanged) {
                     s_lastArtTrackKey = next.artTrackKey;
                     s_lastArtAttempt = 0.0;
                     s_artTrackFirstAttempt = now;
+                    s_lastArtBytesHash = 0;
+                    s_hasLastArtBytesHash = false;
                 }
 
                 // Some providers publish the title before the final thumbnail,
-                // or briefly return the previous track's cached thumbnail. Probe
-                // every 500 ms for the first 3 seconds and replace the image only
-                // when its decoded pixels actually differ.
+                // or briefly return the previous track's cached thumbnail. Keep
+                // checking frequently while metadata settles, then at a slower
+                // rate for a while so late artwork can still replace a stale cover.
                 const double artTrackAge = s_artTrackFirstAttempt > 0.0
                     ? now - s_artTrackFirstAttempt : 1000.0;
-                const bool checkingForFreshArtwork = artTrackAge >= 0.0 && artTrackAge < 3.0;
+                const bool checkingForFreshArtwork = artTrackAge >= 0.0 && artTrackAge < 6.0;
+                const bool checkingForLateArtwork = artTrackAge >= 6.0 && artTrackAge < 20.0;
                 const bool shouldProbeArtwork = artTrackChanged ||
                     (checkingForFreshArtwork && now - s_lastArtAttempt >= 0.5) ||
-                    (!next.art && now - s_lastArtAttempt >= 2.0);
+                    (checkingForLateArtwork && now - s_lastArtAttempt >= 1.5) ||
+                    (!next.art && now - s_lastArtAttempt >= 1.0);
                 if (shouldProbeArtwork) {
                     s_lastArtAttempt = now;
                     try {
                         auto thumbnail = properties.Thumbnail();
                         if (thumbnail) {
                             auto imageBytes = ReadWinRtStreamBytes(thumbnail);
-                            BitmapPixels decodedArt;
-                            if (DecodeImageBytesToPixels(imageBytes, &decodedArt)) {
-                                const bool artworkChanged = !next.art ||
-                                    next.art->width != decodedArt.width ||
-                                    next.art->height != decodedArt.height ||
-                                    next.art->bgra != decodedArt.bgra;
-                                if (artworkChanged) {
-                                    next.art = std::make_shared<const BitmapPixels>(std::move(decodedArt));
-                                    if (next.previousArt && next.trackId != prev.trackId) {
-                                        next.artTransitionStartedAt = now;
+                            if (!imageBytes.empty()) {
+                                const uint64_t bytesHash = HashArtworkBytes(imageBytes);
+                                // Providers often return the same stale thumbnail for
+                                // several polls. Hash the bytes first and avoid repeating
+                                // the more expensive WIC decode until the payload changes.
+                                // A matching hash only makes decoding redundant when a
+                                // decoded cover is already attached to this snapshot.
+                                // After a media session is recreated, next.art can be empty
+                                // even though the provider returns the same thumbnail bytes.
+                                if (!next.art || !s_hasLastArtBytesHash || bytesHash != s_lastArtBytesHash) {
+                                    s_lastArtBytesHash = bytesHash;
+                                    s_hasLastArtBytesHash = true;
+                                    BitmapPixels decodedArt;
+                                    if (DecodeImageBytesToPixels(imageBytes, &decodedArt)) {
+                                        const bool artworkChanged = !next.art ||
+                                            next.art->width != decodedArt.width ||
+                                            next.art->height != decodedArt.height ||
+                                            next.art->bgra != decodedArt.bgra;
+                                        if (artworkChanged) {
+                                            next.art = std::make_shared<const BitmapPixels>(std::move(decodedArt));
+                                            if (next.previousArt && next.trackId != prev.trackId) {
+                                                next.artTransitionStartedAt = now;
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -2506,9 +2542,18 @@ class Renderer {
         if (pw != bitmapWidth_ || ph != bitmapHeight_) {
             if (!CreateBackingBitmap(pw, ph)) return false;
             g_layoutDirty = false;
+            // Consume before positioning so a concurrent placement request is not lost.
+            g_windowPositionDirty.exchange(false);
             PositionOverlayWindow(hwnd_, pw, ph, settings);
-        } else if (g_layoutDirty.exchange(false)) {
-            PositionOverlayWindow(hwnd_, pw, ph, settings);
+        } else {
+            // Consume the redraw request before doing window work, so a concurrent
+            // update raised during positioning remains pending for the next frame.
+            g_layoutDirty.exchange(false);
+            // Content animations (accent morphing, hover and button feedback) only
+            // need a redraw. Reposition the HWND only for actual placement changes.
+            if (g_windowPositionDirty.exchange(false)) {
+                PositionOverlayWindow(hwnd_, pw, ph, settings);
+            }
         }
 
         RECT rc = {0, 0, bitmapWidth_, bitmapHeight_};
@@ -4393,6 +4438,7 @@ DWORD WINAPI SettingsMenuThreadProc(void* param) {
     }
     g_settingsMenuOpen = false;
     g_layoutDirty = true;
+    g_windowPositionDirty = true;
     return 0;
 }
 
@@ -4405,6 +4451,7 @@ void StartSettingsMenu(HWND hwnd, POINT screenPoint) {
         g_foregroundBeforeSettingsMenu = nullptr;
     }
     g_layoutDirty = true;
+    g_windowPositionDirty = true;
 
     auto args = std::make_unique<SettingsMenuThreadArgs>();
     args->hwnd = hwnd;
@@ -4414,6 +4461,7 @@ void StartSettingsMenu(HWND hwnd, POINT screenPoint) {
     if (!thread) {
         g_settingsMenuOpen = false;
         g_foregroundBeforeSettingsMenu = nullptr;
+        g_windowPositionDirty = true;
         return;
     }
     args.release();
@@ -4465,6 +4513,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                          prcNewWindow->bottom - prcNewWindow->top,
                          SWP_NOZORDER | SWP_NOACTIVATE);
             g_layoutDirty = true;
+            g_windowPositionDirty = true;
             return 0;
         }
         
@@ -4472,6 +4521,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             const Settings cfg = GetSettingsCopy();
             g_targetMonitor.store(ResolveTargetMonitor(cfg.targetMonitor));
             g_layoutDirty = true;
+            g_windowPositionDirty = true;
             return 0;
         }
         
@@ -4804,10 +4854,14 @@ DWORD WINAPI RenderThreadProc(void*) {
     bool prevPlaying = false;
     bool prevCtrlState = false;
     std::wstring lastFgApp;
+    double lastForegroundCheck = -1.0;
     int lastMinute = -1;
-    
+
     int cachedRefreshRate = 60;
     double lastRefreshCheck = 0.0;
+    HMONITOR cachedDpiMonitor = nullptr;
+    float cachedDpiScale = 1.0f;
+    double lastDpiCheck = -1.0;
 
     while (WaitForSingleObject(g_stopEvent, 0) == WAIT_TIMEOUT) {
         MSG message = {};
@@ -4828,11 +4882,18 @@ DWORD WINAPI RenderThreadProc(void*) {
         const double now = NowSeconds();
         StopHotkeyCaptureIfDone();
 
-        std::wstring currentFgApp = GetForegroundExeName();
-        if (currentFgApp != lastFgApp) {
-            lastFgApp = currentFgApp;
-            g_layoutDirty = true;
+        // Resolving the foreground process requires window/process queries.
+        // Per-app positioning does not need this work on every rendered frame.
+        if (lastForegroundCheck < 0.0 || now - lastForegroundCheck >= 0.25) {
+            lastForegroundCheck = now;
+            std::wstring detectedFgApp = GetForegroundExeName();
+            if (detectedFgApp != lastFgApp) {
+                lastFgApp = std::move(detectedFgApp);
+                g_layoutDirty = true;
+                g_windowPositionDirty = true;
+            }
         }
+        const std::wstring& currentFgApp = lastFgApp;
 
         SYSTEMTIME st;
         GetLocalTime(&st);
@@ -4867,7 +4928,16 @@ DWORD WINAPI RenderThreadProc(void*) {
                 targetMon = g_targetMonitor.load();
                 if (!targetMon) targetMon = ResolveTargetMonitor(cfg.targetMonitor);
             }
-            cfg.sizeScale = cfg.baseSizeScale * GetMonitorDpiScale(targetMon);
+            // Monitor DPI is stable for long periods. Avoid querying it on
+            // every render-loop iteration; refresh on monitor changes or once
+            // per second so display-scale changes are still picked up.
+            if (targetMon != cachedDpiMonitor || lastDpiCheck < 0.0 ||
+                now - lastDpiCheck >= 1.0) {
+                cachedDpiMonitor = targetMon;
+                cachedDpiScale = GetMonitorDpiScale(targetMon);
+                lastDpiCheck = now;
+            }
+            cfg.sizeScale = cfg.baseSizeScale * cachedDpiScale;
         } else {
             cfg.sizeScale = cfg.baseSizeScale;
         }
@@ -4912,6 +4982,7 @@ DWORD WINAPI RenderThreadProc(void*) {
             parked = false;
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             g_layoutDirty = true;
+            g_windowPositionDirty = true;
             previousFrame = std::chrono::steady_clock::now();
             nextFrameTarget = previousFrame;
         }
@@ -4945,6 +5016,7 @@ DWORD WINAPI RenderThreadProc(void*) {
                                      !moveMode && !g_settingsMenuOpen.load();
         if (g_forceForeground.exchange(forceForeground) != forceForeground) {
             g_layoutDirty = true;
+            g_windowPositionDirty = true;
         }
 
         const bool isInteracting = (g_clickThrough.load() && ctrlHeld && hover) ||
@@ -4976,7 +5048,7 @@ DWORD WINAPI RenderThreadProc(void*) {
                 g_pressedMediaButton.load() != -1 ||
                 g_dragging.load() ||
                 (g_colorRainbowEnabled.load() && snapshot.media.playing) ||
-                renderer.IsAnimationActive(widthSpring.value / cfg.sizeScale)) {
+                (expanded && renderer.IsAnimationActive(widthSpring.value / cfg.sizeScale))) {
                 needsRender = true;
             }
         }
@@ -5088,7 +5160,9 @@ DWORD WINAPI RenderThreadProc(void*) {
                     cachedRefreshRate = GetMonitorRefreshRate(hwnd);
                     lastRefreshCheck = now;
                 }
-                targetFps = cachedRefreshRate;
+                // Auto mode caps continuous animation at 60 FPS.
+                // Higher refresh rates remain available as explicit settings.
+                targetFps = std::min(cachedRefreshRate, 60);
             }
             targetFps = ClampInt(targetFps, 30, 1000);
             double targetFrameMs = 1000.0 / targetFps;
